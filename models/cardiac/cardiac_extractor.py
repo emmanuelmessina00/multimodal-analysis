@@ -28,7 +28,8 @@ def get_cardiac_metrics_by_bbi(bbi):
 
 def extract_cardiac_window(df: pd.DataFrame, start_sec: int = 0, duration_sec: int = 20) -> np.ndarray:
     window= df.iloc[start_sec: start_sec + duration_sec]
-    bbi= window["x_hrv_0_1"].dropna()
+    target_col = 'hrv' if 'hrv' in window.columns else 'x_hrv_0_1'
+    bbi = pd.to_numeric(window[target_col], errors='coerce').dropna()
     bbi_valid = bbi[bbi > 0].to_numpy(dtype=np.float64)
 
 
