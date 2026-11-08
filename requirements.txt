@@ -6,3 +6,7 @@ opencv-python
 torch
 matplotlib
 tqdm
+pandas
+scikit-learn
+fitparse
+pytz
