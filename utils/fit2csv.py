@@ -12,27 +12,28 @@ CST = pytz.timezone('Europe/Vienna')
 
 def main():
 
-    output_dir = "data/cardiac/csv"
-    os.makedirs(output_dir, exist_ok=True)
-    source_dir = "."
+    cardiac_dir = "data/cardiac"
 
-    files = os.listdir(source_dir)
-    fit_files = [file for file in files if file[-4:].lower() == '.fit']
+    if not os.path.exists(cardiac_dir):
+        print(f"[WARN] Cartella non trovata: {cardiac_dir}")
+        return
+
+    files = os.listdir(cardiac_dir)
+    fit_files = [f for f in files if f.lower().endswith('.fit')]
+
+    if not fit_files:
+        print(f"[WARN] Nessun file .fit trovato in {cardiac_dir}")
+        return
 
     for file in fit_files:
-        fit_path = os.path.join(source_dir, file)
-        new_filename = os.path.join(output_dir, file[:-4] + '.csv')
-
-        if os.path.exists(new_filename):
-            # print('%s already exists. skipping.' % new_filename)
-            continue
+        fit_path = os.path.join(cardiac_dir, file)
+        csv_filename = os.path.join(cardiac_dir, file[:-4] + '.csv')
 
         fitfile = fitparse.FitFile(fit_path, data_processor=fitparse.StandardUnitsDataProcessor())
+        print(f"Converting {fit_path} -> {csv_filename}")
+        write_fitfile_to_csv(fitfile, csv_filename)
 
-        print('converting %s -> %s' % (file, new_filename))
-        write_fitfile_to_csv(fitfile, new_filename)
-
-    print('finished conversions')
+    print("finished conversions")
 
 
 def write_fitfile_to_csv(fitfile, output_file='test_output.csv'):
