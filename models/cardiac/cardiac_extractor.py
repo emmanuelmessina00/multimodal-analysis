@@ -1,5 +1,9 @@
 import numpy as np
 import pandas as pd
+
+from utils import fit2csv
+
+
 def get_cardiac_metrics_by_bbi(bbi):
     bbi_size=bbi.shape[0]
 
@@ -58,6 +62,7 @@ if __name__=="__main__":
     example = np.array([820, 790, 810, 780, 830, 800])
     print(f"mu_HR, RMSSD, pNN50 by bbi {example} is: {get_cardiac_metrics_by_bbi(example)}")
     """
-    df=df = pd.read_csv('data/cardiac/example.csv', encoding='latin-1', sep=None, engine='python')
+    fit2csv.main()
+    df = pd.read_csv('data/cardiac/example.csv', encoding='latin-1', sep=None, engine='python')
     df_final=get_all_cardiac_windows(df)
     print(df_final.head())
