@@ -58,6 +58,6 @@ if __name__=="__main__":
     example = np.array([820, 790, 810, 780, 830, 800])
     print(f"mu_HR, RMSSD, pNN50 by bbi {example} is: {get_cardiac_metrics_by_bbi(example)}")
     """
-    df=pd.read_csv('data/cardiac/example.csv', df = pd.read_csv('data/cardiac/example.csv', encoding='latin-1'))
+    df=df = pd.read_csv('data/cardiac/example.csv', encoding='latin-1', sep=None, engine='python')
     df_final=get_all_cardiac_windows(df)
     print(df_final.head())
