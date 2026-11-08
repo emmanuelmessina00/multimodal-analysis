@@ -74,7 +74,7 @@ class VisualEmotionExtractor:
         duration_sec: int = 20,
         stride_sec: int = 20,
         target_fps: int = 4,
-        batch_size: int = 16,
+        batch_size: int = 32,
     ) -> pd.DataFrame:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"[ERRORE] Video non trovato in: {video_path}")
