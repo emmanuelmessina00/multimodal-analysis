@@ -47,12 +47,20 @@ def build_multimodal_dataset(
 
 
 if __name__ == "__main__":
-    if __name__ == "__main__":
-        VIDEO_PATHS = [
-            os.path.join(PROJECT_ROOT, "data", "video", "camera_A000.mp4"),
-            os.path.join(PROJECT_ROOT, "data", "video", "camera_A001.mp4"),
-        ]
-        STOP_VIDEO_INDEX = 1
-        STOP_TIME_IN_SEGMENT = 120.0
-        CARDIAC_PATH = os.path.join(PROJECT_ROOT, "data", "cardiac")
-        OUT_CSV = os.path.join(PROJECT_ROOT, "data", "multimodal.csv")
+    VIDEO_PATHS = [
+        os.path.join(PROJECT_ROOT, "data", "video", "camera_A000.mp4"),
+        os.path.join(PROJECT_ROOT, "data", "video", "camera_A001.mp4"),
+    ]
+    STOP_VIDEO_INDEX = 1
+    STOP_TIME_IN_SEGMENT = 120.0
+    CARDIAC_PATH = os.path.join(PROJECT_ROOT, "data", "cardiac")
+    OUT_CSV = os.path.join(PROJECT_ROOT, "data", "multimodal.csv")
+
+    df_multimodal = build_multimodal_dataset(
+        video_paths=VIDEO_PATHS,
+        stop_video_index=STOP_VIDEO_INDEX,
+        stop_time_in_segment=STOP_TIME_IN_SEGMENT,
+        cardiac_path=CARDIAC_PATH,
+    )
+    df_multimodal.to_csv(OUT_CSV, index=False)
+    print(f"Salvate {len(df_multimodal)} finestre in {OUT_CSV}")
