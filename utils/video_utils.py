@@ -1,106 +1,150 @@
+"""
+Allineamento video <-> battito a finestre fisse (default 20 s).
+
+Logica:
+  1. I segmenti video vengono messi in fila su una timeline continua.
+  2. L'istante di stop (indicato a mano nel video) coincide con la fine della registrazione cardiaca.
+  3. Da lì si tagliano finestre da `window_sec` a ritroso, fino all'inizio del video.
+  4. Le finestre senza dati cardiaci sufficienti (es. buco dovuto a un .fit illeggibile)
+     vengono SCARTATE, così non entrano né nel calcolo video né nel dataset finale.
+
+Ogni finestra ha un `window_id` stabile (0 = prima finestra del video): se una finestra viene
+scartata, il suo id semplicemente manca, e si vede dove sono i buchi.
+"""
 import os
 import sys
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import cv2
 import pandas as pd
-import numpy as np
 
-from models.cardiac.cardiac_extractor import extract_cardiac_window, load_and_merge_cardiac_folder
+from models.cardiac.cardiac_extractor import load_cardiac_folder, cardiac_features
 
 
-def build_backward_aligned_windows(
-        video_paths: list[str],
-        stop_video_index: int,          # 0 se lo stop è nel primo video, 1 se è nel secondo
-        stop_time_in_segment: float,    # secondi dall'inizio di quel segmento
-        cardiac_csv_path: str,          # percorso alla cartella (es. "data/cardiac") coi 4 file o a un singolo CSV
-        window_sec: int = 20
-):
-    durations = []
-    fps_list = []
-
+def get_video_info(video_paths: list[str]) -> pd.DataFrame:
+    """fps, numero di frame, durata e offset di ogni segmento sulla timeline continua."""
+    rows, offset = [], 0.0
     for vp in video_paths:
         if not os.path.exists(vp):
             raise FileNotFoundError(f"File video non trovato: {vp}")
-
         cap = cv2.VideoCapture(vp)
         fps = cap.get(cv2.CAP_PROP_FPS)
-        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-
-        if fps <= 0 or np.isnan(fps):
-            fps = 24.0
-
-        durations.append(frames / fps if fps > 0 else 0.0)
-        fps_list.append(fps)
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
+        if not fps or fps <= 0 or n_frames <= 0:
+            # Un fps inventato sposterebbe tutte le finestre: meglio fermarsi
+            raise ValueError(f"FPS/numero frame non leggibili per {vp} (fps={fps}, frames={n_frames})")
+        duration = n_frames / fps
+        rows.append({'path': vp, 'fps': fps, 'n_frames': n_frames,
+                     'duration': duration, 'offset': offset})
+        offset += duration
+    return pd.DataFrame(rows)
 
-    t_stop_vid = sum(durations[:stop_video_index]) + stop_time_in_segment
-    print(f"Istante di stop sul video continuo: {t_stop_vid:.2f} s")
 
-    # Carica e unisce tutti i 4 file CSV della registrazione in un'unica timeline ordinata
-    df_hr = load_and_merge_cardiac_folder(cardiac_csv_path)
+def check_cardiac_anchor(files: pd.DataFrame) -> None:
+    """
+    L'allineamento usa l'ULTIMO campione cardiaco come istante di stop.
+    Se l'ultimo file della registrazione è illeggibile/troncato (o non si sa dove si colloca),
+    quell'istante non è affidabile e tutte le finestre risulterebbero sfasate: ci fermiamo.
+    """
+    ok = files[files['status'] == 'ok']
+    bad = files[files['status'] != 'ok']
+    if ok.empty:
+        raise ValueError("Nessun file cardiaco integro: impossibile ancorare lo stop.")
 
-    t_start_hr = df_hr['timestamp'].iloc[0]
-    t_end_hr = df_hr['timestamp'].iloc[-1]
-    total_hr_sec = (t_end_hr - t_start_hr).total_seconds()
+    last_ok_start = pd.to_datetime(ok['start'], utc=True).max()
+    bad_starts = pd.to_datetime(bad['start'], utc=True)
+    # File danneggiato con inizio sconosciuto o successivo all'ultimo integro -> è (forse) l'ultimo
+    suspicious = bad[bad_starts.isna() | (bad_starts >= last_ok_start)]
+    if not suspicious.empty:
+        raise ValueError(
+            "La fine della registrazione cardiaca non è affidabile: l'ultimo file è danneggiato "
+            f"o non databile ({', '.join(suspicious['file'])}). "
+            "Passa `hr_stop_ts` con l'orario reale di stop dell'orologio, oppure escludi la sessione."
+        )
+    if not bad.empty:
+        print(f"[WARN] File danneggiati in mezzo alla registrazione ({', '.join(bad['file'])}): "
+              "le finestre che cadono nel buco verranno scartate.")
 
-    if total_hr_sec < t_stop_vid:
-        raise ValueError(f"Il battito unificato ({total_hr_sec:.1f}s) è più corto del video fino allo stop ({t_stop_vid:.1f}s)!")
 
-    # Istante esatto sulla timeline Garmin che corrisponde a t=0.0 del video continuo
-    video_zero_ts = t_end_hr - pd.Timedelta(seconds=t_stop_vid)
+def build_aligned_windows(
+        video_paths: list[str],
+        stop_video_index: int,          # 0 se lo stop è nel primo video, 1 se è nel secondo, ...
+        stop_time_in_segment: float,    # secondi dall'inizio di quel segmento
+        cardiac_path: str,              # cartella con i file della registrazione o singolo file
+        window_sec: int = 20,
+        min_hr_coverage: float = 0.8,   # frazione minima della finestra coperta da campioni cardiaci
+        hr_stop_ts: str | pd.Timestamp | None = None,  # override manuale dell'istante di stop
+) -> pd.DataFrame:
+    """
+    Ritorna la tabella delle finestre allineate, ordinata nel tempo, con colonne:
+    window_id, video_idx, vid_start_sec, vid_end_sec, ts_start, ts_end, mu_hr, rmssd, pnn50, hr_coverage
+    (vid_*_sec sono sulla timeline continua di tutti i segmenti video).
+    """
+    videos = get_video_info(video_paths)
+    if stop_time_in_segment > videos['duration'][stop_video_index]:
+        raise ValueError("stop_time_in_segment oltre la durata del segmento indicato.")
+    t_stop_vid = videos['offset'][stop_video_index] + stop_time_in_segment
 
-    # Calcolo finestre da 20s a ritroso dallo stop
+    df_hr, files = load_cardiac_folder(cardiac_path)
+    if hr_stop_ts is None:
+        check_cardiac_anchor(files)
+        hr_stop_ts = df_hr['timestamp'].iloc[-1]
+    else:
+        hr_stop_ts = pd.Timestamp(hr_stop_ts)
+        if hr_stop_ts.tzinfo is None:
+            hr_stop_ts = hr_stop_ts.tz_localize(df_hr['timestamp'].dt.tz)
+
+    # Istante (orologio) che corrisponde a t=0 della timeline video continua
+    video_zero_ts = hr_stop_ts - pd.Timedelta(seconds=t_stop_vid)
+
+    # Finestre a ritroso dallo stop: l'ultima finisce esattamente allo stop
     n_windows = int(t_stop_vid // window_sec)
-    valid_start_vid = t_stop_vid - (n_windows * window_sec)
+    first_start = t_stop_vid - n_windows * window_sec
+    starts = [round(first_start + i * window_sec, 3) for i in range(n_windows)]
 
-    windows = []
-    for w in range(n_windows):
-        v_start = valid_start_vid + w * window_sec
-        v_end = v_start + window_sec
+    windows = pd.DataFrame({
+        'window_id': range(n_windows),
+        'vid_start_sec': starts,
+        'vid_end_sec': [s + window_sec for s in starts],
+    })
+    windows['video_idx'] = (videos['offset'].searchsorted(windows['vid_start_sec'], side='right') - 1)
+    windows['ts_start'] = video_zero_ts + pd.to_timedelta(windows['vid_start_sec'], unit='s')
+    windows['ts_end'] = video_zero_ts + pd.to_timedelta(windows['vid_end_sec'], unit='s')
 
-        w_ts_start = video_zero_ts + pd.Timedelta(seconds=v_start)
-        w_ts_end = video_zero_ts + pd.Timedelta(seconds=v_end)
+    windows = windows.merge(cardiac_features(df_hr, windows, window_sec), on='window_id')
 
-        window_mask = (df_hr['timestamp'] >= w_ts_start) & (df_hr['timestamp'] < w_ts_end)
-        window_df_slice = df_hr[window_mask]
+    # Scarta le finestre senza copertura cardiaca sufficiente (buchi, video iniziato prima dell'orologio, ...)
+    dropped = windows[windows['hr_coverage'] < min_hr_coverage]
+    if not dropped.empty:
+        print(f"[WARN] Scartate {len(dropped)}/{n_windows} finestre con copertura cardiaca "
+              f"< {min_hr_coverage:.0%}: window_id {dropped['window_id'].tolist()}")
+    windows = windows[windows['hr_coverage'] >= min_hr_coverage]
 
-        metrics = extract_cardiac_window(window_df_slice)
-        mu_hr, rmssd, pnn50 = float(metrics[0]), float(metrics[1]), float(metrics[2])
+    print(f"[Align] Stop video a {t_stop_vid:.2f}s = {hr_stop_ts} | t=0 video = {video_zero_ts} | "
+          f"{len(windows)} finestre valide da {window_sec}s")
 
-        windows.append({
-            "window_id": w,
-            "window_start": v_start,
-            "window_end": v_end,
-            "vid_start_sec": v_start,
-            "vid_end_sec": v_end,
-            "mu_hr": mu_hr,
-            "rmssd": rmssd,
-            "pnn50": pnn50,
-        })
-
-    return pd.DataFrame(windows), durations, fps_list
+    cols = ['window_id', 'video_idx', 'vid_start_sec', 'vid_end_sec', 'ts_start', 'ts_end',
+            'mu_hr', 'rmssd', 'pnn50', 'hr_coverage']
+    return windows[cols].sort_values('ts_start').reset_index(drop=True)
 
 
 if __name__ == "__main__":
-    print("Test in corso di video_utils.py...")
+    test_videos = [os.path.join(PROJECT_ROOT, "data", "video", v)
+                   for v in ("camera_A000.mp4", "camera_A001.mp4")]
+    test_cardiac_dir = os.path.join(PROJECT_ROOT, "data", "cardiac")
 
-    test_videos = ["data/video/camera_A000.mp4", "data/video/camera_A001.mp4"]
-    test_cardiac_dir = "data/cardiac"
-
-    if os.path.exists(test_videos[0]) and os.path.exists(test_cardiac_dir):
-        df_windows, durations, fps_list = build_backward_aligned_windows(
-            video_paths=test_videos,
-            stop_video_index=1,
-            stop_time_in_segment=120.0,
-            cardiac_csv_path=test_cardiac_dir,
-            window_sec=20
-        )
-        print("\nTest riuscito con successo! Ecco le prime righe:")
-        print(df_windows.head())
-        df_windows.to_csv("data/aligned_data.csv", index=False)
-    else:
-        print("[INFO] File di test non trovati ai path specificati.")
+    df_windows = build_aligned_windows(
+        video_paths=test_videos,
+        stop_video_index=1,
+        stop_time_in_segment=120.0,
+        cardiac_path=test_cardiac_dir,
+        window_sec=20,
+    )
+    print(df_windows.head())
+    out = os.path.join(PROJECT_ROOT, "data", "aligned_data.csv")
+    df_windows.to_csv(out, index=False)
+    print(f"Salvato {out}")

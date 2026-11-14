@@ -36,134 +36,110 @@ class VisualEmotionExtractor:
             print(f"[WARN] Pesi '{weights_path}' non trovati! Uso modalita' simulata (dummy).")
             self.model = None
 
-    def _process_batch(self, batch_frames: list[np.ndarray]) -> tuple[np.ndarray, int]:
-        """Esegue inferenza su un batch di frame accumulando le confidenze."""
-        conf_acc = np.zeros(len(EMOTION_CLASSES), dtype=np.float32)
-        detected = 0
-
-        if not batch_frames or self.model is None:
-            return conf_acc, detected
-
+    def _predict(self, frames: list[np.ndarray]) -> list[tuple[int, float] | None]:
+        """Per ogni frame ritorna (classe, confidenza) del primo volto rilevato, o None."""
+        if not frames or self.model is None:
+            return [None] * len(frames)
         if self.use_clahe:
-            batch_frames = [apply_clahe(f) for f in batch_frames]
+            frames = [apply_clahe(f) for f in frames]
 
-        results = self.model.predict(
-            source=batch_frames,
-            conf=self.conf,
-            imgsz=self.imgsz,
-            device=self.device,
-            verbose=False,
-            save=False,
-            batch=len(batch_frames)
-        )
-
+        results = self.model.predict(source=frames, conf=self.conf, imgsz=self.imgsz,
+                                     device=self.device, verbose=False, save=False, batch=len(frames))
+        out = []
         for res in results:
-            if len(res.boxes) > 0:
-                detected += 1
-                box = res.boxes[0]
-                cls_id = int(box.cls[0])
-                conf_val = float(box.conf[0])
-                if 0 <= cls_id < len(EMOTION_CLASSES):
-                    conf_acc[cls_id] += conf_val
+            if len(res.boxes) > 0 and 0 <= int(res.boxes[0].cls[0]) < len(EMOTION_CLASSES):
+                out.append((int(res.boxes[0].cls[0]), float(res.boxes[0].conf[0])))
+            else:
+                out.append(None)
+        return out
 
-        return conf_acc, detected
-
-    def get_all_video_windows(
+    def extract_windows(
         self,
-        video_path: str,
-        duration_sec: int = 20,
-        stride_sec: int = 20,
+        video_paths: list[str],
+        windows: pd.DataFrame,
         target_fps: int = 4,
-        batch_size: int = 32,
+        batch_size: int = 16,
     ) -> pd.DataFrame:
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"[ERRORE] Video non trovato in: {video_path}")
+        """
+        Calcola le probabilità di emozione per ogni finestra della tabella `windows`
+        (colonne richieste: window_id, vid_start_sec, vid_end_sec sulla timeline continua
+        dei segmenti video, nello stesso ordine di `video_paths`).
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise FileNotFoundError(f"Impossibile aprire il video: {video_path}")
+        Un'unica passata sequenziale su tutti i segmenti: le finestre a cavallo tra due
+        file ricevono frame da entrambi. I frame fuori dalle finestre non vengono convertiti né analizzati.
+        """
+        win = windows.sort_values('vid_start_sec')
+        starts = win['vid_start_sec'].to_numpy()
+        ends = win['vid_end_sec'].to_numpy()
+        ids = win['window_id'].to_numpy()
 
-        orig_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_duration_sec = total_frames / orig_fps
+        conf_acc = {wid: np.zeros(len(EMOTION_CLASSES), dtype=np.float32) for wid in ids}
+        buffer_frames, buffer_ids = [], []
 
-        frame_step = max(1, int(round(orig_fps / target_fps)))
-        total_windows = int((video_duration_sec - duration_sec) // stride_sec) + 1
+        def flush():
+            for wid, pred in zip(buffer_ids, self._predict(buffer_frames)):
+                if pred is not None:
+                    conf_acc[wid][pred[0]] += pred[1]
+            buffer_frames.clear()
+            buffer_ids.clear()
 
-        print(f"[VisualBranch] Durata video: {video_duration_sec:.1f}s | FPS: {orig_fps:.1f} | Totale finestre stimate: {total_windows}")
-        print(f"[VisualBranch] Subsampling: 1 frame ogni {frame_step} (~{target_fps} fps effettivi)")
+        offset = 0.0
+        for vp in video_paths:
+            cap = cv2.VideoCapture(vp)
+            if not cap.isOpened():
+                raise FileNotFoundError(f"Impossibile aprire il video: {vp}")
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            step = max(1, int(round(fps / target_fps)))
+            print(f"[VisualBranch] {os.path.basename(vp)}: {n_frames / fps:.1f}s @ {fps:.2f} fps, "
+                  f"1 frame ogni {step}")
+
+            for frame_idx in range(n_frames):
+                if not cap.grab():  # avanza; la conversione del frame avviene solo con retrieve()
+                    break
+                if frame_idx % step:
+                    continue
+                t = offset + frame_idx / fps
+                k = np.searchsorted(starts, t, side='right') - 1
+                if k < 0 or t >= ends[k]:
+                    continue  # frame fuori da ogni finestra valida
+                ok, frame = cap.retrieve()
+                if not ok:
+                    continue
+                buffer_frames.append(frame)
+                buffer_ids.append(ids[k])
+                if len(buffer_frames) >= batch_size:
+                    flush()
+
+            cap.release()
+            offset += n_frames / fps
+        flush()
 
         rows = []
-        current_window_idx = 0
-        window_frames = []
-
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            current_time_sec = frame_idx / orig_fps
-            window_start_sec = current_window_idx * stride_sec
-            window_end_sec = window_start_sec + duration_sec
-
-            if window_end_sec > video_duration_sec:
-                break
-
-            if window_start_sec <= current_time_sec < window_end_sec:
-                if frame_idx % frame_step == 0:
-                    window_frames.append(frame)
-
-            elif current_time_sec >= window_end_sec:
-                conf_accumulator = np.zeros(len(EMOTION_CLASSES), dtype=np.float32)
-                detected_total = 0
-
-                for i in range(0, len(window_frames), batch_size):
-                    b_frames = window_frames[i : i + batch_size]
-                    c_acc, d_count = self._process_batch(b_frames)
-                    conf_accumulator += c_acc
-                    detected_total += d_count
-
-                if detected_total == 0 or conf_accumulator.sum() == 0:
-                    probs = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-                else:
-                    probs = conf_accumulator / conf_accumulator.sum()
-
-                row_dict = {
-                    "window_start": window_start_sec,
-                    "window_end": window_end_sec,
-                }
-                for emo, p in zip(EMOTION_CLASSES, probs):
-                    row_dict[f"p_{emo}"] = float(p)
-                rows.append(row_dict)
-
-                current_window_idx += 1
-                if current_window_idx % 10 == 0 or current_window_idx == total_windows:
-                    print(f"  -> Elaborata finestra {current_window_idx}/{total_windows} ({window_end_sec:.0f}s / {video_duration_sec:.0f}s)")
-
-                window_frames = []
-                next_start = current_window_idx * stride_sec
-                next_end = next_start + duration_sec
-                if next_start <= current_time_sec < next_end and (frame_idx % frame_step == 0):
-                    window_frames.append(frame)
-
-            frame_idx += 1
-
-        cap.release()
+        for wid in ids:
+            acc = conf_acc[wid]
+            # Fallback: nessun volto rilevato nella finestra -> neutral
+            probs = acc / acc.sum() if acc.sum() > 0 else np.eye(len(EMOTION_CLASSES))[EMOTION_CLASSES.index("neutral")]
+            rows.append({'window_id': wid, **{f"p_{e}": float(p) for e, p in zip(EMOTION_CLASSES, probs)}})
         return pd.DataFrame(rows)
+
+
+def fixed_windows(video_path: str, window_sec: int = 20) -> pd.DataFrame:
+    """Finestre consecutive da 0 s su un singolo video (utile per test senza dati cardiaci)."""
+    cap = cv2.VideoCapture(video_path)
+    duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    n = int(duration // window_sec)
+    return pd.DataFrame({'window_id': range(n),
+                         'vid_start_sec': [i * window_sec for i in range(n)],
+                         'vid_end_sec': [(i + 1) * window_sec for i in range(n)]})
 
 
 if __name__ == "__main__":
     extractor = VisualEmotionExtractor(weights_path="checkpoints/best.pt")
     test_video = "data/video/camera_D_0_08.mp4"
 
-    df_video = extractor.get_all_video_windows(
-        video_path=test_video,
-        duration_sec=20,
-        stride_sec=20,
-        target_fps=4,
-        batch_size=16
-    )
+    df_video = extractor.extract_windows([test_video], fixed_windows(test_video), target_fps=4)
 
     print(f"\n--- Estratte {len(df_video)} finestre video da {test_video} ---")
     print(df_video)

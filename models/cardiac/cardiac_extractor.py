@@ -1,7 +1,7 @@
 import os
+import re
 import sys
 import glob
-
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if PROJECT_ROOT not in sys.path:
@@ -9,12 +9,13 @@ if PROJECT_ROOT not in sys.path:
 
 import numpy as np
 import pandas as pd
-import fitparse
 
-from utils import fit2csv
-
+from utils.fit2csv import read_fit, TIMEZONE
 
 
+# ----------------------------------------------------------------------------
+# Metriche HRV
+# ----------------------------------------------------------------------------
 
 def get_cardiac_metrics_by_bbi(bbi):
     bbi_size = bbi.shape[0]
@@ -62,97 +63,119 @@ def extract_cardiac_window(window_df: pd.DataFrame) -> np.ndarray:
     return np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
 
-def load_and_merge_cardiac_folder(cardiac_path: str = "data/cardiac") -> pd.DataFrame:
+# ----------------------------------------------------------------------------
+# Caricamento di tutti i file di una registrazione
+# ----------------------------------------------------------------------------
+
+def _start_from_filename(path: str) -> pd.Timestamp | None:
+    """I file Garmin si chiamano 'YYYY-MM-DD-HH-MM-SS.fit' (ora locale di inizio registrazione)."""
+    m = re.search(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})", os.path.basename(path))
+    if not m:
+        return None
+    return pd.to_datetime(m.group(1), format="%Y-%m-%d-%H-%M-%S").tz_localize(TIMEZONE)
+
+
+def _read_csv(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, sep=None, engine='python', encoding='latin-1')
+    df = df.rename(columns={'x_hrv_0_1': 'hrv', 'heart_rate': 'hr'})  # vecchio formato export
+    if not {'timestamp', 'hr'} <= set(df.columns):
+        return pd.DataFrame()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dt.tz_convert(TIMEZONE)
+    return df
+
+
+def load_cardiac_folder(cardiac_path: str = "data/cardiac") -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Accetta il percorso di una cartella (con i file .fit/.csv della registrazione)
-    oppure di un singolo file CSV. Converte i .fit saltando quelli corrotti
-    e unisce tutti i CSV validi in un unico DataFrame ordinato per timestamp.
+    Carica tutti i file di UNA registrazione (cartella con .fit/.csv, oppure un singolo file).
+
+    Ritorna:
+      df_hr : timeline unica, ordinata per timestamp, senza duplicati
+      files : report per file con colonne [file, status, start, end, n_rows]
+              status = 'ok' | 'danneggiato' (troncato, tenute le righe lette) | 'illeggibile'
     """
     if os.path.isfile(cardiac_path):
-        csv_files = [cardiac_path]
+        paths = [cardiac_path]
     elif os.path.isdir(cardiac_path):
-        fit_files = glob.glob(os.path.join(cardiac_path, "*.fit"))
-        if fit_files:
-            print("Avvio conversione .fit -> .csv con gestione file corrotti...")
-            for fit_path in fit_files:
-                csv_filename = os.path.join(cardiac_path, os.path.basename(fit_path)[:-4] + '.csv')
-                try:
-                    fitfile = fitparse.FitFile(fit_path, data_processor=fitparse.StandardUnitsDataProcessor())
-                    fit2csv.write_fitfile_to_csv(fitfile, csv_filename)
-                except Exception as e:
-                    print(f"[SKIP] File FIT non valido o corrotto '{os.path.basename(fit_path)}': {e}")
-
-        csv_files = sorted(glob.glob(os.path.join(cardiac_path, "*.csv")))
-        csv_files = [
-            f for f in csv_files
-            if not os.path.basename(f).startswith("windows_")
-               and not os.path.basename(f).startswith("merged_")
-        ]
+        fits = glob.glob(os.path.join(cardiac_path, "*.fit"))
+        fit_stems = {os.path.splitext(p)[0] for p in fits}
+        # I .csv vengono usati solo se non esiste il .fit originale (evita doppioni/csv vecchi)
+        csvs = [p for p in glob.glob(os.path.join(cardiac_path, "*.csv"))
+                if os.path.splitext(p)[0] not in fit_stems]
+        paths = fits + csvs
     else:
         raise FileNotFoundError(f"Percorso cardiaco non trovato: {cardiac_path}")
 
-    if not csv_files:
-        raise FileNotFoundError(f"Nessun file CSV cardiaco valido trovato in: {cardiac_path}")
+    if not paths:
+        raise FileNotFoundError(f"Nessun file .fit/.csv in: {cardiac_path}")
 
-    dfs = []
-    for f in csv_files:
-        try:
-            df_part = pd.read_csv(f, encoding='latin-1', sep=None, engine='python')
-            if 'hr' in df_part.columns and 'timestamp' in df_part.columns and len(df_part) > 0:
-                dfs.append(df_part)
-            else:
-                print(f"[SKIP] {os.path.basename(f)} ignorato (vuoto o mancano colonne obbligatorie).")
-        except Exception as e:
-            print(f"[ERRORE] Lettura CSV fallita per {f}: {e}")
+    parts, report = [], []
+    for p in paths:
+        if p.lower().endswith('.fit'):
+            df, error = read_fit(p)
+        else:
+            df, error = _read_csv(p), None
 
-    if not dfs:
-        raise ValueError("Nessun DataFrame cardiaco valido caricato dalla cartella.")
+        df = df.dropna(subset=['timestamp', 'hr']) if not df.empty else df
+        if df.empty:
+            status = 'illeggibile'
+            start, end = _start_from_filename(p), None
+        else:
+            status = 'ok' if error is None else 'danneggiato'
+            start, end = df['timestamp'].min(), df['timestamp'].max()
+            parts.append(df)
 
-    df_merged = pd.concat(dfs, ignore_index=True)
-    df_merged = df_merged.dropna(subset=['hr', 'timestamp']).reset_index(drop=True)
-    df_merged['timestamp'] = pd.to_datetime(df_merged['timestamp'], errors='coerce')
-    df_merged = (
-        df_merged.dropna(subset=['timestamp'])
-        .sort_values('timestamp')
-        .drop_duplicates(subset=['timestamp'], keep='first')
-        .reset_index(drop=True)
-    )
+        report.append({'file': os.path.basename(p), 'status': status,
+                       'start': start, 'end': end, 'n_rows': len(df), 'error': error})
 
-    print(f"[CardiacBranch] Uniti {len(dfs)} file CSV -> {len(df_merged)} campioni validi "
-          f"(da {df_merged['timestamp'].iloc[0]} a {df_merged['timestamp'].iloc[-1]})")
-    return df_merged
+    # Ordine cronologico reale dei file (non alfabetico); quelli senza data in fondo
+    files = (pd.DataFrame(report)
+             .sort_values('start', na_position='last', key=lambda s: pd.to_datetime(s, utc=True))
+             .reset_index(drop=True))
+
+    print("[CardiacBranch] File della registrazione:")
+    for r in files.itertuples():
+        print(f"  - {r.file:<32} {r.status:<12} {r.start} -> {r.end} ({r.n_rows} righe)"
+              + (f" | {r.error}" if r.error is not None else ""))
+
+    if not parts:
+        raise ValueError("Nessun file cardiaco leggibile nella registrazione.")
+
+    df_hr = (pd.concat(parts, ignore_index=True)
+             .sort_values('timestamp')
+             .drop_duplicates(subset='timestamp', keep='first')
+             .reset_index(drop=True))
+
+    gaps = df_hr['timestamp'].diff().dt.total_seconds()
+    for i in gaps[gaps > 5].index:
+        print(f"  [GAP] {gaps[i]:.0f}s senza dati: {df_hr['timestamp'][i - 1]} -> {df_hr['timestamp'][i]}")
+
+    return df_hr, files
 
 
-def get_all_cardiac_windows(df: pd.DataFrame, duration_sec: int = 20, stride_sec: int = 20) -> pd.DataFrame:
-    """Taglia le finestre sul DataFrame unificato basandosi sui timestamp reali."""
-    if len(df) == 0:
-        return pd.DataFrame()
+# ----------------------------------------------------------------------------
+# Feature per finestra
+# ----------------------------------------------------------------------------
 
+def cardiac_features(df_hr: pd.DataFrame, windows: pd.DataFrame, window_sec: float) -> pd.DataFrame:
+    """
+    Calcola mu_hr, rmssd, pnn50 per ogni finestra [ts_start, ts_end) della tabella `windows`.
+    `hr_coverage` = frazione della finestra coperta da campioni (1 Hz): serve a scartare
+    le finestre che cadono in buchi (es. file .fit illeggibile).
+    """
+    ts = df_hr['timestamp']  # ordinata: possiamo usare la ricerca binaria
     rows = []
-    t_start_session = df['timestamp'].iloc[0]
-    total_seconds = int((df['timestamp'].iloc[-1] - t_start_session).total_seconds())
-
-    for start_sec in range(0, total_seconds - duration_sec + 1, stride_sec):
-        window_mask = (
-            (df['timestamp'] >= t_start_session + pd.Timedelta(seconds=start_sec)) &
-            (df['timestamp'] < t_start_session + pd.Timedelta(seconds=start_sec + duration_sec))
-        )
-        window_df = df[window_mask]
+    for w in windows.itertuples():
+        i0, i1 = ts.searchsorted(w.ts_start), ts.searchsorted(w.ts_end)
+        window_df = df_hr.iloc[i0:i1]
         mu_hr, rmssd, pnn50 = extract_cardiac_window(window_df)
-
-        rows.append({
-            "window_start": start_sec,
-            "window_end": start_sec + duration_sec,
-            "mu_hr": float(mu_hr),
-            "rmssd": float(rmssd),
-            "pnn50": float(pnn50),
-        })
-
+        rows.append({'window_id': w.window_id,
+                     'mu_hr': float(mu_hr), 'rmssd': float(rmssd), 'pnn50': float(pnn50),
+                     'hr_coverage': min(1.0, len(window_df) / window_sec)})
     return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
-    df_unified = load_and_merge_cardiac_folder("data/cardiac")
-    df_windows = get_all_cardiac_windows(df_unified)
-    print(f"\nCompletato! Estratte {len(df_windows)} finestre dalla registrazione unificata.")
-    print(df_windows.head())
+    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(PROJECT_ROOT, "data", "cardiac")
+    df_hr, files = load_cardiac_folder(path)
+    print(f"\n{len(df_hr)} campioni validi, da {df_hr['timestamp'].iloc[0]} a {df_hr['timestamp'].iloc[-1]}")
+    print(df_hr.head())
