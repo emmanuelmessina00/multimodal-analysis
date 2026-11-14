@@ -85,6 +85,13 @@ def _read_csv(path: str) -> pd.DataFrame:
 
 
 def load_cardiac_folder(cardiac_path: str = "data/cardiac") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Carica tutti i file di UNA registrazione (cartella con .fit/.csv, oppure un singolo file).
+
+    Ritorna:
+      df_hr : timeline unica, ordinata per timestamp, senza duplicati
+      files : report per file con colonne [file, status, start, end, n_rows, error]
+    """
     if os.path.isfile(cardiac_path):
         paths = [cardiac_path]
     elif os.path.isdir(cardiac_path):
@@ -100,6 +107,67 @@ def load_cardiac_folder(cardiac_path: str = "data/cardiac") -> tuple[pd.DataFram
     else:
         raise FileNotFoundError(f"Percorso cardiaco non trovato: {cardiac_path}")
 
+    if not paths:
+        raise FileNotFoundError(f"Nessun file .fit/.csv in: {cardiac_path}")
+
+    parts, report = [], []
+    for p in paths:
+        if p.lower().endswith('.fit'):
+            df, error = read_fit(p)
+        else:
+            df, error = _read_csv(p), None
+
+        df = df.dropna(subset=['timestamp', 'hr']) if not df.empty else df
+        if df.empty:
+            status = 'illeggibile'
+            start, end = _start_from_filename(p), None
+        else:
+            status = 'ok' if error is None else 'danneggiato'
+            start, end = df['timestamp'].min(), df['timestamp'].max()
+            parts.append(df)
+
+        report.append({
+            'file': os.path.basename(p),
+            'status': status,
+            'start': start,
+            'end': end,
+            'n_rows': len(df),
+            'error': error,
+        })
+
+    # Ordine cronologico reale dei file (non alfabetico); quelli senza data in fondo
+    files = (
+        pd.DataFrame(report)
+        .sort_values('start', na_position='last', key=lambda s: pd.to_datetime(s, utc=True))
+        .reset_index(drop=True)
+    )
+
+    print("[CardiacBranch] File della registrazione:")
+    for r in files.itertuples():
+        print(f"  - {r.file:<32} {r.status:<12} {r.start} -> {r.end} ({r.n_rows} righe)"
+              + (f" | {r.error}" if r.error is not None else ""))
+
+    if not parts:
+        raise ValueError("Nessun file cardiaco leggibile nella registrazione.")
+
+    df_hr = (
+        pd.concat(parts, ignore_index=True)
+        .sort_values('timestamp')
+        .drop_duplicates(subset='timestamp', keep='first')
+        .reset_index(drop=True)
+    )
+
+    gaps = df_hr['timestamp'].diff().dt.total_seconds()
+    for i in gaps[gaps > 5].index:
+        print(f"  [GAP] {gaps[i]:.0f}s senza dati: {df_hr['timestamp'][i - 1]} -> {df_hr['timestamp'][i]}")
+
+    return df_hr, files
+
+
+# ----------------------------------------------------------------------------
+# Feature per finestra
+# ----------------------------------------------------------------------------
+
 def cardiac_features(df_hr: pd.DataFrame, windows: pd.DataFrame, window_sec: float) -> pd.DataFrame:
     """
     Calcola mu_hr, rmssd, pnn50 per ogni finestra [ts_start, ts_end) della tabella `windows`.
@@ -112,9 +180,13 @@ def cardiac_features(df_hr: pd.DataFrame, windows: pd.DataFrame, window_sec: flo
         i0, i1 = ts.searchsorted(w.ts_start), ts.searchsorted(w.ts_end)
         window_df = df_hr.iloc[i0:i1]
         mu_hr, rmssd, pnn50 = extract_cardiac_window(window_df)
-        rows.append({'window_id': w.window_id,
-                     'mu_hr': float(mu_hr), 'rmssd': float(rmssd), 'pnn50': float(pnn50),
-                     'hr_coverage': min(1.0, len(window_df) / window_sec)})
+        rows.append({
+            'window_id': w.window_id,
+            'mu_hr': float(mu_hr),
+            'rmssd': float(rmssd),
+            'pnn50': float(pnn50),
+            'hr_coverage': min(1.0, len(window_df) / window_sec),
+        })
     return pd.DataFrame(rows)
 
 
