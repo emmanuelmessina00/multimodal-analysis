@@ -101,5 +101,6 @@ if __name__ == "__main__":
         )
         print("\nTest riuscito con successo! Ecco le prime righe:")
         print(df_windows.head())
+        df_windows.to_csv("data/aligned_data.csv", index=False)
     else:
         print("[INFO] File di test non trovati ai path specificati.")
