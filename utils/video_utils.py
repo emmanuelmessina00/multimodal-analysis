@@ -46,28 +46,41 @@ def get_video_info(video_paths: list[str]) -> pd.DataFrame:
 
 def check_cardiac_anchor(files: pd.DataFrame) -> None:
     """
-    L'allineamento usa l'ULTIMO campione cardiaco come istante di stop.
-    Se l'ultimo file della registrazione è illeggibile/troncato (o non si sa dove si colloca),
-    quell'istante non è affidabile e tutte le finestre risulterebbero sfasate: ci fermiamo.
+    Verifica che la fine della registrazione cardiaca sia affidabile.
+    Accetta file illeggibili se non sono l'ultimo file della sequenza.
     """
     ok = files[files['status'] == 'ok']
     bad = files[files['status'] != 'ok']
     if ok.empty:
         raise ValueError("Nessun file cardiaco integro: impossibile ancorare lo stop.")
 
+    if bad.empty:
+        return
+
+    # Ordiniamo per nome file per capire chi è l'ultimo segmento se manca la data nel filename
+    files_by_name = files.sort_values('file').reset_index(drop=True)
+    last_file_row = files_by_name.iloc[-1]
+
     last_ok_start = pd.to_datetime(ok['start'], utc=True).max()
     bad_starts = pd.to_datetime(bad['start'], utc=True)
-    # File danneggiato con inizio sconosciuto o successivo all'ultimo integro -> è (forse) l'ultimo
-    suspicious = bad[bad_starts.isna() | (bad_starts >= last_ok_start)]
+
+    # Un file danneggiato blocca l'ancoraggio SOLO se:
+    # 1) Ha una data nota successiva all'ultimo file ok, OPPURE
+    # 2) Non ha data nota (NaT) MA è l'ultimo file per nome (es. example4.fit rotto)
+    suspicious = bad[
+        (bad_starts >= last_ok_start) |
+        (bad_starts.isna() & (bad['file'] == last_file_row['file']))
+    ]
+
     if not suspicious.empty:
         raise ValueError(
             "La fine della registrazione cardiaca non è affidabile: l'ultimo file è danneggiato "
             f"o non databile ({', '.join(suspicious['file'])}). "
             "Passa `hr_stop_ts` con l'orario reale di stop dell'orologio, oppure escludi la sessione."
         )
-    if not bad.empty:
-        print(f"[WARN] File danneggiati in mezzo alla registrazione ({', '.join(bad['file'])}): "
-              "le finestre che cadono nel buco verranno scartate.")
+
+    print(f"[WARN] File danneggiati/illeggibili non finali ignorati ({', '.join(bad['file'])}): "
+          "eventuali finestre che cadono nel buco verranno scartate.")
 
 
 def build_aligned_windows(
