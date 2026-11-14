@@ -1,15 +1,17 @@
 import os
 import sys
 import glob
-
+import fitparse
+import numpy as np
+import pandas as pd
+from utils import fit2csv
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import numpy as np
-import pandas as pd
 
-from utils import fit2csv
+
+
 
 
 def get_cardiac_metrics_by_bbi(bbi):
