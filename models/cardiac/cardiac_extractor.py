@@ -36,12 +36,8 @@ def extract_cardiac_window(df: pd.DataFrame, start_sec: int = 0, duration_sec: i
     mu_hr, rmssd, pnn50 = get_cardiac_metrics_by_bbi(bbi_valid)
     return np.array([mu_hr, rmssd, pnn50], dtype=np.float32)
 
-import numpy as np
-import pandas as pd
-
-
 def get_all_cardiac_windows(
-    df, duration_sec: int = 20, stride_sec: int = 20
+        df, duration_sec: int = 20, stride_sec: int = 20
 ) :
 
     df_size = len(df)
