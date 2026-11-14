@@ -60,40 +60,50 @@ def extract_cardiac_window(window_df: pd.DataFrame) -> np.ndarray:
 
 def load_and_merge_cardiac_folder(cardiac_path: str = "data/cardiac") -> pd.DataFrame:
     """
-    Accetta il percorso di una cartella (con i 4 file .fit/.csv della registrazione)
-    oppure di un singolo file CSV. Unisce tutti i CSV in un unico DataFrame
-    ordinato cronologicamente per timestamp.
+    Accetta il percorso di una cartella (con i file .fit/.csv della registrazione)
+    oppure di un singolo file CSV. Converte i .fit saltando quelli corrotti
+    e unisce tutti i CSV validi in un unico DataFrame ordinato per timestamp.
     """
     if os.path.isfile(cardiac_path):
         csv_files = [cardiac_path]
     elif os.path.isdir(cardiac_path):
         fit_files = glob.glob(os.path.join(cardiac_path, "*.fit"))
         if fit_files:
-            fit2csv.main()
+            print("Avvio conversione .fit -> .csv con gestione file corrotti...")
+            for fit_path in fit_files:
+                csv_filename = os.path.join(cardiac_path, os.path.basename(fit_path)[:-4] + '.csv')
+                try:
+                    fitfile = fitparse.FitFile(fit_path, data_processor=fitparse.StandardUnitsDataProcessor())
+                    fit2csv.write_fitfile_to_csv(fitfile, csv_filename)
+                except Exception as e:
+                    print(f"[SKIP] File FIT non valido o corrotto '{os.path.basename(fit_path)}': {e}")
+
         csv_files = sorted(glob.glob(os.path.join(cardiac_path, "*.csv")))
-        # Escludiamo eventuali file di output già salvati se si trovano nella stessa cartella
-        csv_files = [f for f in csv_files if not os.path.basename(f).startswith("windows_") and not os.path.basename(f).startswith("merged_")]
+        csv_files = [
+            f for f in csv_files
+            if not os.path.basename(f).startswith("windows_")
+               and not os.path.basename(f).startswith("merged_")
+        ]
     else:
         raise FileNotFoundError(f"Percorso cardiaco non trovato: {cardiac_path}")
 
     if not csv_files:
-        raise FileNotFoundError(f"Nessun file CSV trovato in: {cardiac_path}")
+        raise FileNotFoundError(f"Nessun file CSV cardiaco valido trovato in: {cardiac_path}")
 
     dfs = []
     for f in csv_files:
         try:
             df_part = pd.read_csv(f, encoding='latin-1', sep=None, engine='python')
-            if 'hr' in df_part.columns and 'timestamp' in df_part.columns:
+            if 'hr' in df_part.columns and 'timestamp' in df_part.columns and len(df_part) > 0:
                 dfs.append(df_part)
             else:
-                print(f"[SKIP] {os.path.basename(f)} ignorato (mancano 'hr' o 'timestamp').")
+                print(f"[SKIP] {os.path.basename(f)} ignorato (vuoto o mancano colonne obbligatorie).")
         except Exception as e:
-            print(f"[ERRORE] Lettura fallita per {f}: {e}")
+            print(f"[ERRORE] Lettura CSV fallita per {f}: {e}")
 
     if not dfs:
-        raise ValueError("Nessun DataFrame cardiaco valido caricato.")
+        raise ValueError("Nessun DataFrame cardiaco valido caricato dalla cartella.")
 
-    # Concatena i 4 file in un'unica timeline continua
     df_merged = pd.concat(dfs, ignore_index=True)
     df_merged = df_merged.dropna(subset=['hr', 'timestamp']).reset_index(drop=True)
     df_merged['timestamp'] = pd.to_datetime(df_merged['timestamp'], errors='coerce')
@@ -104,7 +114,7 @@ def load_and_merge_cardiac_folder(cardiac_path: str = "data/cardiac") -> pd.Data
         .reset_index(drop=True)
     )
 
-    print(f"[CardiacBranch] Uniti {len(dfs)} file CSV -> {len(df_merged)} campioni totali "
+    print(f"[CardiacBranch] Uniti {len(dfs)} file CSV -> {len(df_merged)} campioni validi "
           f"(da {df_merged['timestamp'].iloc[0]} a {df_merged['timestamp'].iloc[-1]})")
     return df_merged
 
