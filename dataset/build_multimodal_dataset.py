@@ -18,7 +18,6 @@ def build_multimodal_dataset(
         cardiac_path: str,
         window_sec: int = 20,
         weights_path: str = os.path.join(PROJECT_ROOT, "checkpoints", "best.pt"),
-        hr_stop_ts=None,
 ) -> pd.DataFrame:
     """
     1. Allinea video e battito e genera le finestre da `window_sec` (già filtrate:
@@ -32,7 +31,6 @@ def build_multimodal_dataset(
         stop_time_in_segment=stop_time_in_segment,
         cardiac_path=cardiac_path,
         window_sec=window_sec,
-        hr_stop_ts=hr_stop_ts,
     )
     if windows.empty:
         raise ValueError("Nessuna finestra valida dopo l'allineamento: niente da estrarre dal video.")

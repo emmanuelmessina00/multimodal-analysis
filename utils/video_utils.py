@@ -37,7 +37,6 @@ def build_aligned_windows(
         cardiac_path: str,
         window_sec: int = 20,
         min_hr_coverage: float = 0.8,
-        hr_stop_ts: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """
     Allinea video e battito a ritroso dallo stop e restituisce le finestre validate.
@@ -48,13 +47,7 @@ def build_aligned_windows(
     t_stop_vid = videos['offset'][stop_video_index] + stop_time_in_segment
 
     df_hr = load_cardiac_folder(cardiac_path)
-    if hr_stop_ts is None:
-        hr_stop_ts = df_hr['timestamp'].iloc[-1]
-    else:
-        hr_stop_ts = pd.Timestamp(hr_stop_ts)
-        if hr_stop_ts.tzinfo is None:
-            hr_stop_ts = hr_stop_ts.tz_localize(df_hr['timestamp'].dt.tz)
-
+    hr_stop_ts = df_hr['timestamp'].iloc[-1]
     video_zero_ts = hr_stop_ts - pd.Timedelta(seconds=t_stop_vid)
 
     n_windows = int(t_stop_vid // window_sec)

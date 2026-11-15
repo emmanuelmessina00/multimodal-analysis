@@ -11,12 +11,6 @@ import pandas as pd
 import fitparse
 
 from utils.fit2csv import write_fitfile_to_csv, CST
-
-
-# ----------------------------------------------------------------------------
-# Metriche HRV
-# ----------------------------------------------------------------------------
-
 def get_cardiac_metrics_by_bbi(bbi: np.ndarray) -> tuple[float, float, float]:
     bbi_size = bbi.shape[0]
 
