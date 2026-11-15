@@ -1,16 +1,3 @@
-"""
-Allineamento video <-> battito a finestre fisse (default 20 s).
-
-Logica:
-  1. I segmenti video vengono messi in fila su una timeline continua.
-  2. L'istante di stop (indicato a mano nel video) coincide con la fine della registrazione cardiaca.
-  3. Da lì si tagliano finestre da `window_sec` a ritroso, fino all'inizio del video.
-  4. Le finestre senza dati cardiaci sufficienti (es. buco dovuto a un .fit illeggibile)
-     vengono SCARTATE, così non entrano né nel calcolo video né nel dataset finale.
-
-Ogni finestra ha un `window_id` stabile (0 = prima finestra del video): se una finestra viene
-scartata, il suo id semplicemente manca, e si vede dove sono i buchi.
-"""
 import os
 import sys
 
@@ -35,7 +22,6 @@ def get_video_info(video_paths: list[str]) -> pd.DataFrame:
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         if not fps or fps <= 0 or n_frames <= 0:
-            # Un fps inventato sposterebbe tutte le finestre: meglio fermarsi
             raise ValueError(f"FPS/numero frame non leggibili per {vp} (fps={fps}, frames={n_frames})")
         duration = n_frames / fps
         rows.append({'path': vp, 'fps': fps, 'n_frames': n_frames,
@@ -44,77 +30,33 @@ def get_video_info(video_paths: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def check_cardiac_anchor(files: pd.DataFrame) -> None:
-    """
-    Verifica che la fine della registrazione cardiaca sia affidabile.
-    Accetta file illeggibili se non sono l'ultimo file della sequenza.
-    """
-    ok = files[files['status'] == 'ok']
-    bad = files[files['status'] != 'ok']
-    if ok.empty:
-        raise ValueError("Nessun file cardiaco integro: impossibile ancorare lo stop.")
-
-    if bad.empty:
-        return
-
-    # Ordiniamo per nome file per capire chi è l'ultimo segmento se manca la data nel filename
-    files_by_name = files.sort_values('file').reset_index(drop=True)
-    last_file_row = files_by_name.iloc[-1]
-
-    last_ok_start = pd.to_datetime(ok['start'], utc=True).max()
-    bad_starts = pd.to_datetime(bad['start'], utc=True)
-
-    # Un file danneggiato blocca l'ancoraggio SOLO se:
-    # 1) Ha una data nota successiva all'ultimo file ok, OPPURE
-    # 2) Non ha data nota (NaT) MA è l'ultimo file per nome (es. example4.fit rotto)
-    suspicious = bad[
-        (bad_starts >= last_ok_start) |
-        (bad_starts.isna() & (bad['file'] == last_file_row['file']))
-    ]
-
-    if not suspicious.empty:
-        raise ValueError(
-            "La fine della registrazione cardiaca non è affidabile: l'ultimo file è danneggiato "
-            f"o non databile ({', '.join(suspicious['file'])}). "
-            "Passa `hr_stop_ts` con l'orario reale di stop dell'orologio, oppure escludi la sessione."
-        )
-
-    print(f"[WARN] File danneggiati/illeggibili non finali ignorati ({', '.join(bad['file'])}): "
-          "eventuali finestre che cadono nel buco verranno scartate.")
-
-
 def build_aligned_windows(
         video_paths: list[str],
-        stop_video_index: int,          # 0 se lo stop è nel primo video, 1 se è nel secondo, ...
-        stop_time_in_segment: float,    # secondi dall'inizio di quel segmento
-        cardiac_path: str,              # cartella con i file della registrazione o singolo file
+        stop_video_index: int,
+        stop_time_in_segment: float,
+        cardiac_path: str,
         window_sec: int = 20,
-        min_hr_coverage: float = 0.8,   # frazione minima della finestra coperta da campioni cardiaci
-        hr_stop_ts: str | pd.Timestamp | None = None,  # override manuale dell'istante di stop
+        min_hr_coverage: float = 0.8,
+        hr_stop_ts: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """
-    Ritorna la tabella delle finestre allineate, ordinata nel tempo, con colonne:
-    window_id, video_idx, vid_start_sec, vid_end_sec, ts_start, ts_end, mu_hr, rmssd, pnn50, hr_coverage
-    (vid_*_sec sono sulla timeline continua di tutti i segmenti video).
+    Allinea video e battito a ritroso dallo stop e restituisce le finestre validate.
     """
     videos = get_video_info(video_paths)
     if stop_time_in_segment > videos['duration'][stop_video_index]:
         raise ValueError("stop_time_in_segment oltre la durata del segmento indicato.")
     t_stop_vid = videos['offset'][stop_video_index] + stop_time_in_segment
 
-    df_hr, files = load_cardiac_folder(cardiac_path)
+    df_hr = load_cardiac_folder(cardiac_path)
     if hr_stop_ts is None:
-        check_cardiac_anchor(files)
         hr_stop_ts = df_hr['timestamp'].iloc[-1]
     else:
         hr_stop_ts = pd.Timestamp(hr_stop_ts)
         if hr_stop_ts.tzinfo is None:
             hr_stop_ts = hr_stop_ts.tz_localize(df_hr['timestamp'].dt.tz)
 
-    # Istante (orologio) che corrisponde a t=0 della timeline video continua
     video_zero_ts = hr_stop_ts - pd.Timedelta(seconds=t_stop_vid)
 
-    # Finestre a ritroso dallo stop: l'ultima finisce esattamente allo stop
     n_windows = int(t_stop_vid // window_sec)
     first_start = t_stop_vid - n_windows * window_sec
     starts = [round(first_start + i * window_sec, 3) for i in range(n_windows)]
@@ -130,7 +72,6 @@ def build_aligned_windows(
 
     windows = windows.merge(cardiac_features(df_hr, windows, window_sec), on='window_id')
 
-    # Scarta le finestre senza copertura cardiaca sufficiente (buchi, video iniziato prima dell'orologio, ...)
     dropped = windows[windows['hr_coverage'] < min_hr_coverage]
     if not dropped.empty:
         print(f"[WARN] Scartate {len(dropped)}/{n_windows} finestre con copertura cardiaca "
