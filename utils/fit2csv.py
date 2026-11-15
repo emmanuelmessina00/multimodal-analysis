@@ -32,20 +32,18 @@ UTC = pytz.UTC
 CST = pytz.timezone('Europe/Vienna')
 
 
-def main():
-    files = os.listdir()
-    fit_files = [file for file in files if file[-4:].lower() == '.fit']
-    for file in fit_files:
-        new_filename = file[:-4] + '.csv'
-        if os.path.exists(new_filename):
-            # print('%s already exists. skipping.' % new_filename)
+def main(folder: str = "data/cardiac"):
+    for file in sorted(os.listdir(folder)):
+        if not file.lower().endswith('.fit'):
             continue
-        fitfile = fitparse.FitFile(file,
-                                   data_processor=fitparse.StandardUnitsDataProcessor())
-
-        print('converting %s' % file)
-        write_fitfile_to_csv(fitfile, new_filename)
-    print('finished conversions')
+        fit_path = os.path.join(folder, file)
+        csv_path = fit_path[:-4] + '.csv'
+        if os.path.exists(csv_path):
+            continue
+        fitfile = fitparse.FitFile(fit_path, data_processor=fitparse.StandardUnitsDataProcessor())
+        print(f"converting {fit_path}")
+        write_fitfile_to_csv(fitfile, csv_path)
+    print("finished conversions")
 
 
 def write_fitfile_to_csv(fitfile, output_file='test_output.csv'):
