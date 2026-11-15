@@ -152,6 +152,7 @@ def load_cardiac_folder(cardiac_path: str = "data/cardiac", clean_artifacts: boo
     for i in gaps[gaps > 5].index:
         print(f"  [GAP] {gaps[i]:.0f}s senza dati: {df_hr['timestamp'][i - 1]} -> {df_hr['timestamp'][i]}")
 
+    df_hr.to_csv("data/cardiac/processed/cleaned_cardiac_timeline.csv", index=False)
     return df_hr
 
 def cardiac_features(df_hr: pd.DataFrame, windows: pd.DataFrame, window_sec: float) -> pd.DataFrame:
