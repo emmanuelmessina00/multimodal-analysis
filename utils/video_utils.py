@@ -102,7 +102,7 @@ if __name__ == "__main__":
     df_windows = build_aligned_windows(
         video_paths=test_videos,
         stop_video_index=len(test_videos) - 1,  # di default punta all'ultimo segmento trovato
-        stop_time_in_segment=120.0,
+        stop_time_in_segment=725,
         cardiac_path=test_cardiac_dir,
         window_sec=20,
     )

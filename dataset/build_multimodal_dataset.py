@@ -45,20 +45,32 @@ def build_multimodal_dataset(
 
 
 if __name__ == "__main__":
-    VIDEO_PATHS = [
-        os.path.join(PROJECT_ROOT, "data", "video", "camera_A000.mp4"),
-        os.path.join(PROJECT_ROOT, "data", "video", "camera_A001.mp4"),
-    ]
-    STOP_VIDEO_INDEX = 1
-    STOP_TIME_IN_SEGMENT = 120.0
-    CARDIAC_PATH = os.path.join(PROJECT_ROOT, "data", "cardiac")
-    OUT_CSV = os.path.join(PROJECT_ROOT, "data", "multimodal.csv")
+    import glob
+    import re
 
-    df_multimodal = build_multimodal_dataset(
-        video_paths=VIDEO_PATHS,
-        stop_video_index=STOP_VIDEO_INDEX,
-        stop_time_in_segment=STOP_TIME_IN_SEGMENT,
-        cardiac_path=CARDIAC_PATH,
+
+    def natural_sort_key(path: str):
+        return [int(t) if t.isdigit() else t.lower()
+                for t in re.split(r'(\d+)', os.path.basename(path))]
+
+
+    video_dir = os.path.join(PROJECT_ROOT, "data", "video")
+    test_videos = sorted(
+        [p for p in glob.glob(os.path.join(video_dir, "*")) if p.lower().endswith(".mp4")],
+        key=natural_sort_key
     )
-    df_multimodal.to_csv(OUT_CSV, index=False)
-    print(f"Salvate {len(df_multimodal)} finestre in {OUT_CSV}")
+    if not test_videos:
+        raise FileNotFoundError(f"Nessun file .mp4 trovato in: {video_dir}")
+
+    print(f"Trovati {len(test_videos)} segmenti video: {[os.path.basename(v) for v in test_videos]}")
+
+    test_cardiac_dir = os.path.join(PROJECT_ROOT, "data", "cardiac", "processed")
+    out = os.path.join("data","processed","aligned_data.csv")
+    df_multimodal = build_multimodal_dataset(
+        video_paths=test_videos,
+        stop_video_index=len(test_videos) - 1,
+        stop_time_in_segment=725,
+        cardiac_path=test_cardiac_dir,
+    )
+    df_multimodal.to_csv(out, index=False)
+    print(f"Salvate {len(df_multimodal)} finestre in {out}")

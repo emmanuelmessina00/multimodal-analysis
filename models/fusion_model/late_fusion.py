@@ -56,5 +56,5 @@ if "__main__" == __name__:
     clf.fit(X_train, y_train)
 
 
-    res=run_inference(clf, f"data/multimodal.csv")
+    res=run_inference(clf, f"data/processed/aligned_data.csv")
     print(res)
