@@ -80,18 +80,36 @@ def build_aligned_windows(
 
 
 if __name__ == "__main__":
-    test_videos = [os.path.join(PROJECT_ROOT, "data", "video", v)
-                   for v in ("camera_A000.mp4", "camera_A001.mp4")]
-    test_cardiac_dir = os.path.join(PROJECT_ROOT, "data", "cardiac")
+    import glob
+    import re
+
+    def natural_sort_key(path: str):
+        return [int(t) if t.isdigit() else t.lower()
+                for t in re.split(r'(\d+)', os.path.basename(path))]
+
+    video_dir = os.path.join(PROJECT_ROOT, "data", "video")
+    test_videos = sorted(
+        [p for p in glob.glob(os.path.join(video_dir, "*")) if p.lower().endswith(".mp4")],
+        key=natural_sort_key
+    )
+    if not test_videos:
+        raise FileNotFoundError(f"Nessun file .mp4 trovato in: {video_dir}")
+
+    print(f"Trovati {len(test_videos)} segmenti video: {[os.path.basename(v) for v in test_videos]}")
+
+    test_cardiac_dir = os.path.join(PROJECT_ROOT, "data", "cardiac", "processed")
 
     df_windows = build_aligned_windows(
         video_paths=test_videos,
-        stop_video_index=1,
+        stop_video_index=len(test_videos) - 1,  # di default punta all'ultimo segmento trovato
         stop_time_in_segment=120.0,
         cardiac_path=test_cardiac_dir,
         window_sec=20,
     )
     print(df_windows.head())
-    out = os.path.join(PROJECT_ROOT, "data", "aligned_data.csv")
+
+    processed_dir = os.path.join(PROJECT_ROOT, "data", "processed")
+    os.makedirs(processed_dir, exist_ok=True)
+    out = os.path.join(processed_dir, "aligned_data.csv")
     df_windows.to_csv(out, index=False)
     print(f"Salvato {out}")
