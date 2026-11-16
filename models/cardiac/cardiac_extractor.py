@@ -28,12 +28,7 @@ def get_cardiac_metrics_by_bbi(bbi: np.ndarray) -> tuple[float, float, float]:
     return float(mu_HR), float(RMSSD), float(pNN50 * 100)
 
 def clean_cardiac_timeline(df_hr: pd.DataFrame, max_rel_dev: float = 0.20) -> pd.DataFrame:
-    """
-    1. Imputa eventuali None/0 isolati tra hr e hrv tramite la relazione 60000 / x.
-    2. Individua artefatti ottici/da movimento (regola di Malik >20% dalla mediana locale
-       o flag hardware `exception == 1` incoerente con `hr`) e li mette in linea
-       tramite interpolazione lineare.
-    """
+
     df = df_hr.copy()
 
     #Conversione sicura a numerico (gestisce stringhe 'None' o spazi)
@@ -69,31 +64,14 @@ def clean_cardiac_timeline(df_hr: pd.DataFrame, max_rel_dev: float = 0.20) -> pd
 
     return df
 
+
 def extract_cardiac_window(window_df: pd.DataFrame) -> np.ndarray:
-    """Estrae [mu_hr, rmssd, pnn50] su una fetta di DataFrame già filtrata per finestra."""
-    target_col = 'hrv' if 'hrv' in window_df.columns else 'x_hrv_0_1'
-    bbi_valid = np.array([], dtype=np.float64)
+    """Estrae [mu_hr, rmssd, pnn50] da una finestra già pulita con clean_cardiac_timeline."""
+    bbi_valid = window_df['hrv'].dropna().to_numpy(dtype=np.float64)
 
-    if target_col in window_df.columns:
-        bbi = pd.to_numeric(window_df[target_col], errors='coerce').dropna()
-        bbi_valid = bbi[bbi > 0].to_numpy(dtype=np.float64)
-
-    # Caso 1: BBI validi presenti
     if len(bbi_valid) >= 2:
         mu_hr, rmssd, pnn50 = get_cardiac_metrics_by_bbi(bbi_valid)
         return np.array([mu_hr, rmssd, pnn50], dtype=np.float32)
-
-    # Caso 2: Fallback su HR a 1 Hz
-    if 'hr' in window_df.columns:
-        hr_series = pd.to_numeric(window_df['hr'], errors='coerce').dropna()
-        hr_valid = hr_series[hr_series > 0].to_numpy(dtype=np.float64)
-        if len(hr_valid) >= 2:
-            mu_hr = float(np.mean(hr_valid))
-            bbi_approx = 60000.0 / hr_valid
-            _, rmssd, pnn50 = get_cardiac_metrics_by_bbi(bbi_approx)
-            return np.array([mu_hr, rmssd, pnn50], dtype=np.float32)
-        elif len(hr_valid) == 1:
-            return np.array([float(hr_valid[0]), 0.0, 0.0], dtype=np.float32)
 
     return np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
