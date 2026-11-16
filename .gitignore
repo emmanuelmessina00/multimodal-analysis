@@ -175,4 +175,5 @@ cython_debug/
 
 data/cardiac
 data/video
-checkpoints/
+checkpoints/*
+!checkpoints/.gitkeep
