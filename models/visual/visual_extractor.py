@@ -48,7 +48,8 @@ class VisualEmotionExtractor:
         out = []
         for res in results:
             if len(res.boxes) > 0 and 0 <= int(res.boxes[0].cls[0]) < len(EMOTION_CLASSES):
-                out.append((int(res.boxes[0].cls[0]), float(res.boxes[0].conf[0])))
+                bbox = res.boxes[0].xyxy[0].cpu().numpy().tolist()  # [x1, y1, x2, y2]
+                out.append((int(res.boxes[0].cls[0]), float(res.boxes[0].conf[0]), bbox))
             else:
                 out.append(None)
         return out
@@ -62,9 +63,6 @@ class VisualEmotionExtractor:
     ) -> pd.DataFrame:
         """
         Calcola le probabilità di emozione per ogni finestra della tabella `windows`
-        (colonne richieste: window_id, vid_start_sec, vid_end_sec sulla timeline continua
-        dei segmenti video, nello stesso ordine di `video_paths`).
-
         Un'unica passata sequenziale su tutti i segmenti: le finestre a cavallo tra due
         file ricevono frame da entrambi. I frame fuori dalle finestre non vengono convertiti né analizzati.
         """
@@ -73,18 +71,40 @@ class VisualEmotionExtractor:
         ends = win['vid_end_sec'].to_numpy()
         ids = win['window_id'].to_numpy()
 
-        conf_acc = {wid: np.zeros(len(EMOTION_CLASSES), dtype=np.float32) for wid in ids}
-        buffer_frames, buffer_ids = [], []
+        neutral_idx = EMOTION_CLASSES.index("neutral")
+        buffer_frames, buffer_ids, buffer_meta = [], [], []
+        frame_probs = {wid: [] for wid in ids}
+        sampled_counts = {wid: 0 for wid in ids}
+        best_keyframe = {wid: None for wid in ids}
 
         def flush():
-            for wid, pred in zip(buffer_ids, self._predict(buffer_frames)):
+            for wid, (vp_idx, f_idx), pred in zip(buffer_ids, buffer_meta, self._predict(buffer_frames)):
                 if pred is not None:
-                    conf_acc[wid][pred[0]] += pred[1]
+                    cls_idx, conf, bbox = pred
+
+                    # Aggiorna lo storico probabilità per mean / max / std
+                    vec = np.zeros(len(EMOTION_CLASSES), dtype=np.float32)
+                    vec[cls_idx] = conf
+                    frame_probs[wid].append(vec)
+
+                    # Aggiorna il miglior frame della finestra (priorità a emozioni non-neutre)
+                    score = (cls_idx != neutral_idx, conf)
+                    if best_keyframe[wid] is None or score > best_keyframe[wid]["score"]:
+                        best_keyframe[wid] = {
+                            "score": score,
+                            "video_idx": vp_idx,
+                            "local_idx": f_idx,
+                            "bbox": bbox,
+                            "label": EMOTION_CLASSES[cls_idx],
+                            "conf": conf,
+                        }
+
             buffer_frames.clear()
             buffer_ids.clear()
+            buffer_meta.clear()
 
         offset = 0.0
-        for vp in video_paths:
+        for vp_idx, vp in enumerate(video_paths):
             cap = cv2.VideoCapture(vp)
             if not cap.isOpened():
                 raise FileNotFoundError(f"Impossibile aprire il video: {vp}")
@@ -104,10 +124,14 @@ class VisualEmotionExtractor:
                 if k < 0 or t >= ends[k]:
                     continue  # frame fuori da ogni finestra valida
                 ok, frame = cap.retrieve()
+
+
                 if not ok:
                     continue
+                sampled_counts[ids[k]] += 1
                 buffer_frames.append(frame)
                 buffer_ids.append(ids[k])
+                buffer_meta.append((vp_idx, frame_idx))
                 if len(buffer_frames) >= batch_size:
                     flush()
 
@@ -116,30 +140,55 @@ class VisualEmotionExtractor:
         flush()
 
         rows = []
+        neutral_idx = EMOTION_CLASSES.index("neutral")
+
         for wid in ids:
-            acc = conf_acc[wid]
-            # Fallback: nessun volto rilevato nella finestra -> neutral
-            probs = acc / acc.sum() if acc.sum() > 0 else np.eye(len(EMOTION_CLASSES))[EMOTION_CLASSES.index("neutral")]
-            rows.append({'window_id': wid, **{f"p_{e}": float(p) for e, p in zip(EMOTION_CLASSES, probs)}})
+            det_list = frame_probs[wid]
+            n_sampled = sampled_counts[wid]
+            det_rate = len(det_list) / n_sampled if n_sampled > 0 else 0.0
+
+            if len(det_list) > 0:
+                M = np.vstack(det_list)  # shape: (n_rilevamenti, 6)
+                mean_p = M.mean(axis=0)
+                max_p = M.max(axis=0)
+                std_p = M.std(axis=0)
+            else:
+                # Fallback: nessun volto rilevato nella finestra -> neutral = 1.0
+                mean_p = np.eye(len(EMOTION_CLASSES), dtype=np.float32)[neutral_idx]
+                max_p = mean_p.copy()
+                std_p = np.zeros(len(EMOTION_CLASSES), dtype=np.float32)
+
+            row = {
+                "window_id": wid,
+                "face_detection_rate": float(det_rate),
+            }
+            for i, e in enumerate(EMOTION_CLASSES):
+                row[f"p_{e}"] = float(mean_p[i])
+                row[f"max_p_{e}"] = float(max_p[i])
+                row[f"std_p_{e}"] = float(std_p[i])
+
+            kf = best_keyframe[wid]
+            if kf is not None:
+                row["keyframe_video_idx"] = int(kf["video_idx"])
+                row["keyframe_local_idx"] = int(kf["local_idx"])
+                row["bbox_x1"] = float(kf["bbox"][0])
+                row["bbox_y1"] = float(kf["bbox"][1])
+                row["bbox_x2"] = float(kf["bbox"][2])
+                row["bbox_y2"] = float(kf["bbox"][3])
+                row["keyframe_label"] = kf["label"]
+                row["keyframe_conf"] = float(kf["conf"])
+            else:
+                row["keyframe_video_idx"] = -1
+                row["keyframe_local_idx"] = -1
+                row["bbox_x1"] = np.nan
+                row["bbox_y1"] = np.nan
+                row["bbox_x2"] = np.nan
+                row["bbox_y2"] = np.nan
+                row["keyframe_label"] = "none"
+                row["keyframe_conf"] = 0.0
+            rows.append(row)
+
         return pd.DataFrame(rows)
 
-
-def fixed_windows(video_path: str, window_sec: int = 20) -> pd.DataFrame:
-    """Finestre consecutive da 0 s su un singolo video (utile per test senza dati cardiaci)."""
-    cap = cv2.VideoCapture(video_path)
-    duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
-    cap.release()
-    n = int(duration // window_sec)
-    return pd.DataFrame({'window_id': range(n),
-                         'vid_start_sec': [i * window_sec for i in range(n)],
-                         'vid_end_sec': [(i + 1) * window_sec for i in range(n)]})
-
-
 if __name__ == "__main__":
-    extractor = VisualEmotionExtractor(weights_path="checkpoints/best.pt")
-    test_video = "data/video/camera_D_0_08.mp4"
-
-    df_video = extractor.extract_windows([test_video], fixed_windows(test_video), target_fps=4)
-
-    print(f"\n--- Estratte {len(df_video)} finestre video da {test_video} ---")
-    print(df_video)
+    pass
