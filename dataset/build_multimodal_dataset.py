@@ -10,6 +10,9 @@ import pandas as pd
 from utils.video_utils import build_aligned_windows
 from models.visual.visual_extractor import VisualEmotionExtractor
 
+import cv2
+import wandb
+from models.visual.visual_extractor import EMOTION_CLASSES
 
 def build_multimodal_dataset(
         video_paths: list[str],
@@ -74,3 +77,54 @@ if __name__ == "__main__":
     )
     df_multimodal.to_csv(out, index=False)
     print(f"Salvate {len(df_multimodal)} finestre in {out}")
+
+    wandb.init(project="multimodal-analysis", name="home-session")
+
+    class_labels = dict(enumerate(EMOTION_CLASSES))
+    label_to_id = {name: i for i, name in class_labels.items()}
+
+    table = wandb.Table(columns=[
+        "window_id", "frame", "label", "conf",
+        "mu_hr", "rmssd", "pnn50",
+        "p_neutral", "max_p_happy", "max_p_surprise", "max_p_sad",
+    ])
+
+    caps = [cv2.VideoCapture(v) for v in test_videos]
+
+    for _, row in df_multimodal.iterrows():
+        img = None
+        v_idx, f_idx = int(row["keyframe_video_idx"]), int(row["keyframe_local_idx"])
+        if v_idx >= 0 and f_idx >= 0:
+            caps[v_idx].set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+            ok, frame = caps[v_idx].read()
+            if ok:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                boxes = {
+                    "predictions": {
+                        "box_data": [{
+                            "position": {
+                                "minX": float(row["bbox_x1"]),
+                                "minY": float(row["bbox_y1"]),
+                                "maxX": float(row["bbox_x2"]),
+                                "maxY": float(row["bbox_y2"]),
+                            },
+                            "domain": "pixel",
+                            "class_id": label_to_id.get(row["keyframe_label"], 4),
+                            "box_caption": f"{row['keyframe_label']} ({row['keyframe_conf']:.2f})",
+                        }],
+                        "class_labels": class_labels,
+                    }
+                }
+                img = wandb.Image(frame_rgb, boxes=boxes)
+
+        table.add_data(
+            int(row["window_id"]), img, row["keyframe_label"], float(row["keyframe_conf"]),
+            float(row["mu_hr"]), float(row["rmssd"]), float(row["pnn50"]),
+            float(row["p_neutral"]), float(row["max_p_happy"]), float(row["max_p_surprise"]), float(row["max_p_sad"]),
+        )
+
+    for cap in caps:
+        cap.release()
+
+    wandb.log({"multimodal_table": table})
+    wandb.finish()
