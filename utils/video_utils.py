@@ -7,7 +7,7 @@ if PROJECT_ROOT not in sys.path:
 
 import cv2
 import pandas as pd
-
+import re
 from models.cardiac.cardiac_extractor import load_cardiac_folder, cardiac_features
 
 
@@ -74,18 +74,20 @@ def build_aligned_windows(
     print(f"[Align] Stop video a {t_stop_vid:.2f}s = {hr_stop_ts} | t=0 video = {video_zero_ts} | "
           f"{len(windows)} finestre valide da {window_sec}s")
 
-    cols = ['window_id', 'video_idx', 'vid_start_sec', 'vid_end_sec', 'ts_start', 'ts_end',
-            'mu_hr', 'rmssd', 'pnn50', 'hr_coverage']
-    return windows[cols].sort_values('ts_start').reset_index(drop=True)
+    cols = [
+        'window_id', 'video_idx', 'vid_start_sec', 'vid_end_sec', 'ts_start', 'ts_end',
+        'mu_hr', 'rmssd', 'pnn50', 'hr_range', 'sdnn', 'sd1', 'sd2', 'sd1_sd2',
+        'hr_coverage'
+    ]
+    return windows[cols].sort_values(by='ts_start').reset_index(drop=True)
 
+def natural_sort_key(path: str):
+        return [int(t) if t.isdigit() else t.lower()
+                for t in re.split(r'(\d+)', os.path.basename(path))]
 
 if __name__ == "__main__":
     import glob
     import re
-
-    def natural_sort_key(path: str):
-        return [int(t) if t.isdigit() else t.lower()
-                for t in re.split(r'(\d+)', os.path.basename(path))]
 
     video_dir = os.path.join(PROJECT_ROOT, "data", "video")
     test_videos = sorted(

@@ -7,12 +7,24 @@ if PROJECT_ROOT not in sys.path:
 
 import pandas as pd
 
-from utils.video_utils import build_aligned_windows
+from utils.video_utils import build_aligned_windows, natural_sort_key
 from models.visual.visual_extractor import VisualEmotionExtractor
 
 import cv2
 import wandb
 from models.visual.visual_extractor import EMOTION_CLASSES
+
+#Nuova aggiunta prendendo spunto dal paper di Shu
+def add_neutral_baseline(df: pd.DataFrame, neutral_thresh: float = 0.70) -> pd.DataFrame:
+    df = df.copy()
+    is_neutral = df["p_neutral"] > neutral_thresh
+
+    for col in ["mu_hr", "rmssd", "pnn50", "sd1"]:
+
+        baseline = df.loc[is_neutral, col].median() if is_neutral.sum() >= 3 else df[col].median()
+        df[f"delta_{col}"] = df[col] - baseline
+
+    return df
 
 def build_multimodal_dataset(
         video_paths: list[str],
@@ -41,21 +53,17 @@ def build_multimodal_dataset(
     extractor = VisualEmotionExtractor(weights_path=weights_path)
     df_visual = extractor.extract_windows(video_paths, windows)
 
-    return (windows
+    df_merged= (windows
             .merge(df_visual, on='window_id', how='inner', validate='one_to_one')
             .sort_values('ts_start')
             .reset_index(drop=True))
+
+    return add_neutral_baseline(df_merged)
 
 
 if __name__ == "__main__":
     import glob
     import re
-
-
-    def natural_sort_key(path: str):
-        return [int(t) if t.isdigit() else t.lower()
-                for t in re.split(r'(\d+)', os.path.basename(path))]
-
 
     video_dir = os.path.join(PROJECT_ROOT, "data", "video")
     test_videos = sorted(
@@ -85,7 +93,8 @@ if __name__ == "__main__":
 
     table = wandb.Table(columns=[
         "window_id", "frame", "label", "conf",
-        "mu_hr", "rmssd", "pnn50",
+        "mu_hr", "rmssd", "pnn50", 'hr_range', 'sdnn', 'sd1', 'sd2', 'sd1_sd2',
+        'hr_coverage',
         "p_neutral", "max_p_happy", "max_p_surprise", "max_p_sad",
     ])
 
@@ -120,6 +129,8 @@ if __name__ == "__main__":
         table.add_data(
             int(row["window_id"]), img, row["keyframe_label"], float(row["keyframe_conf"]),
             float(row["mu_hr"]), float(row["rmssd"]), float(row["pnn50"]),
+            float(row["hr_range"]), float(row["sdnn"]), float(row["sd1"]), float(row["sd2"]), float(row["sd1_sd2"]),
+            float(row["hr_coverage"]),
             float(row["p_neutral"]), float(row["max_p_happy"]), float(row["max_p_surprise"]), float(row["max_p_sad"]),
         )
 
