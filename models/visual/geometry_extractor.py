@@ -161,11 +161,6 @@ class FacialGeometryExtractor:
         if self.detector:
             self.detector.close()
 
-    def close(self):
-        if self.detector:
-            self.detector.close()
-
-
 if __name__ == "__main__":
     ## Un test giusto per vedere se prende bene le features facciali (scommentare)
     """
@@ -231,4 +226,4 @@ if __name__ == "__main__":
     cv2.destroyAllWindows()
     
     """
-    pass
+    #pass
