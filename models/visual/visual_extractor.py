@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 from ultralytics import YOLO
-
+from models.visual.geometry_extractor import FacialGeometryExtractor
 EMOTION_CLASSES = ["angry", "happy", "sad", "surprise", "neutral", "fear"]
 
 
@@ -28,6 +28,7 @@ class VisualEmotionExtractor:
         self.imgsz = imgsz
         self.use_clahe = use_clahe
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.geometry_extractor = FacialGeometryExtractor()
 
         if os.path.exists(weights_path):
             print(f"[VisualBranch] Caricamento pesi YOLO da: {weights_path} su {self.device}")
@@ -76,9 +77,12 @@ class VisualEmotionExtractor:
         frame_probs = {wid: [] for wid in ids}
         sampled_counts = {wid: 0 for wid in ids}
         best_keyframe = {wid: None for wid in ids}
+        frame_geom = {wid: [] for wid in ids}  # nuova aggiunta per aggiungere la logica del Geometry Extractor
 
         def flush():
-            for wid, (vp_idx, f_idx), pred in zip(buffer_ids, buffer_meta, self._predict(buffer_frames)):
+            for wid, (vp_idx, f_idx), frame, pred in zip(
+                    buffer_ids, buffer_meta, buffer_frames, self._predict(buffer_frames)
+            ):
                 if pred is not None:
                     cls_idx, conf, bbox = pred
 
@@ -86,9 +90,15 @@ class VisualEmotionExtractor:
                     vec = np.zeros(len(EMOTION_CLASSES), dtype=np.float32)
                     vec[cls_idx] = conf
                     frame_probs[wid].append(vec)
+                    geom = self.geometry_extractor.extract_frame(frame)
+                    if geom is not None:
+                        frame_geom[wid].append(geom)
+
 
                     # Aggiorna il miglior frame della finestra (priorità a emozioni non-neutre)
                     score = (cls_idx != neutral_idx, conf)
+
+
                     if best_keyframe[wid] is None or score > best_keyframe[wid]["score"]:
                         best_keyframe[wid] = {
                             "score": score,
@@ -134,11 +144,10 @@ class VisualEmotionExtractor:
                 buffer_meta.append((vp_idx, frame_idx))
                 if len(buffer_frames) >= batch_size:
                     flush()
-
             cap.release()
             offset += n_frames / fps
         flush()
-
+        self.geometry_extractor.close()
         rows = []
         neutral_idx = EMOTION_CLASSES.index("neutral")
 
@@ -186,6 +195,40 @@ class VisualEmotionExtractor:
                 row["bbox_y2"] = np.nan
                 row["keyframe_label"] = "none"
                 row["keyframe_conf"] = 0.0
+
+            geom_list = frame_geom[wid]
+            if len(geom_list) > 0:
+                ear_vals = np.array([g["ear"] for g in geom_list], dtype=np.float32)
+                mar_vals = np.array([g["mar"] for g in geom_list], dtype=np.float32)
+                brow_vals = np.array([g["brow_raise"] for g in geom_list], dtype=np.float32)
+                pitch_vals = np.array([g["pitch"] for g in geom_list], dtype=np.float32)
+                yaw_vals = np.array([g["yaw"] for g in geom_list], dtype=np.float32)
+                roll_vals = np.array([g["roll"] for g in geom_list], dtype=np.float32)
+
+                pitch_std = float(np.std(pitch_vals))
+                yaw_std = float(np.std(yaw_vals))
+                roll_std = float(np.std(roll_vals))
+
+                row["ear_mean"] = float(np.mean(ear_vals))
+                row["ear_std"] = float(np.std(ear_vals))
+                row["mar_mean"] = float(np.mean(mar_vals))
+                row["mar_max"] = float(np.max(mar_vals))
+                row["brow_raise_mean"] = float(np.mean(brow_vals))
+                row["pitch_std"] = pitch_std
+                row["yaw_std"] = yaw_std
+                row["roll_std"] = roll_std
+                row["head_motion_std"] = float(np.sqrt(pitch_std ** 2 + yaw_std ** 2 + roll_std ** 2))
+                row["bs_smile_mean"] = float(np.mean([g["bs_smile"] for g in geom_list]))
+                row["bs_jaw_open_max"] = float(np.max([g["bs_jaw_open"] for g in geom_list]))
+                row["bs_brow_up_mean"] = float(np.mean([g["bs_brow_up"] for g in geom_list]))
+            else:
+                for col in [
+                    "ear_mean", "ear_std", "mar_mean", "mar_max", "brow_raise_mean",
+                    "pitch_std", "yaw_std", "roll_std", "head_motion_std",
+                    "bs_smile_mean", "bs_jaw_open_max", "bs_brow_up_mean",
+                ]:
+                    row[col] = np.nan
+
             rows.append(row)
 
         return pd.DataFrame(rows)

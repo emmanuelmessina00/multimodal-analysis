@@ -10,3 +10,4 @@ pandas
 scikit-learn
 fitparse
 pytz
+mediapipe

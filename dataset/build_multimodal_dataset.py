@@ -93,9 +93,11 @@ if __name__ == "__main__":
 
     table = wandb.Table(columns=[
         "window_id", "frame", "label", "conf",
-        "mu_hr", "rmssd", "pnn50", 'hr_range', 'sdnn', 'sd1', 'sd2', 'sd1_sd2',
-        'hr_coverage',
+        "mu_hr", "rmssd", "pnn50", "hr_range", "sdnn", "sd1", "sd2", "sd1_sd2",
+        "hr_coverage",
         "p_neutral", "max_p_happy", "max_p_surprise", "max_p_sad",
+        "ear_mean", "mar_max", "brow_raise_mean", "head_motion_std",
+        "bs_smile_mean", "bs_jaw_open_max",
     ])
 
     caps = [cv2.VideoCapture(v) for v in test_videos]
@@ -132,6 +134,8 @@ if __name__ == "__main__":
             float(row["hr_range"]), float(row["sdnn"]), float(row["sd1"]), float(row["sd2"]), float(row["sd1_sd2"]),
             float(row["hr_coverage"]),
             float(row["p_neutral"]), float(row["max_p_happy"]), float(row["max_p_surprise"]), float(row["max_p_sad"]),
+            float(row["ear_mean"]), float(row["mar_max"]), float(row["brow_raise_mean"]), float(row["head_motion_std"]),
+            float(row["bs_smile_mean"]), float(row["bs_jaw_open_max"]),
         )
 
     for cap in caps:
