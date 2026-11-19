@@ -116,15 +116,44 @@ class FacialGeometryExtractor:
             bs = {b.category_name: float(b.score) for b in res.face_blendshapes[0]}
 
         return {
+            # Eye Aspect Ratio (EAR): rapporto medio tra l'altezza verticale delle palpebre
+            # e la larghezza orizzontale dell'occhio (mediato tra occhio destro e sinistro).
             "ear": self._compute_ear(pts),
+
+            # Mouth Aspect Ratio (MAR): rapporto tra l'apertura verticale interna delle labbra
             "mar": self._compute_mar(pts),
+
+            # Elevazione normalizzata delle sopracciglia: distanza media verticale tra il centro
+            # del sopracciglio e il margine superiore dell'occhio, divisa per la distanza
+            # inter-oculare.
             "brow_raise": self._compute_brow_raise(pts),
+
+            # Angolo di Pitch (in gradi): inclinazione della testa sull'asse orizzontale
+            # (annuire, guardare in basso verso il tabellone o alzare lo sguardo).
             "pitch": pitch,
+
+            # Angolo di Yaw (in gradi): rotazione orizzontale della testa a destra o a sinistra
+            # (girarsi a guardare gli altri giocatori intorno al tavolo).
             "yaw": yaw,
+
+            # Angolo di Roll (in gradi): inclinazione laterale della testa verso una spalla
+            # (tipico gesto di perplessità, dubbio o riflessione durante il turno di gioco).
             "roll": roll,
+
+            # Blendshape Sorriso (in [0, 1]): media dell'attivazione muscolare degli angoli
+            # della bocca verso l'alto (mouthSmileLeft/Right, analogo all'AU12 di Ekman).
             "bs_smile": (bs.get("mouthSmileLeft", 0.0) + bs.get("mouthSmileRight", 0.0)) / 2.0,
+
+            # Blendshape Apertura Mandibola (in [0, 1]): grado di abbassamento della mandibola
+            # stimato dal modello 3D (complementare a MAR, più robusto alle rotazioni).
             "bs_jaw_open": bs.get("jawOpen", 0.0),
+
+            # Blendshape Sollevamento Sopracciglio Interno (in [0, 1]): attivazione della parte
+            # mediale delle sopracciglia (analogo all'AU1 di Ekman, legato a sorpresa o apprensione).
             "bs_brow_up": bs.get("browInnerUp", 0.0),
+
+            # Blendshape Chiusura Palpebre (in [0, 1]): media di eyeBlinkLeft/Right; misura
+            # direttamente la chiusura dell'occhio anche quando la testa è inclinata.
             "bs_blink": (bs.get("eyeBlinkLeft", 0.0) + bs.get("eyeBlinkRight", 0.0)) / 2.0,
         }
 
@@ -138,24 +167,68 @@ class FacialGeometryExtractor:
 
 
 if __name__ == "__main__":
+    ## Un test giusto per vedere se prende bene le features facciali (scommentare)
+    """
     import glob
+    from utils.video_utils import natural_sort_key
 
-    video_files = sorted(glob.glob(os.path.join(PROJECT_ROOT, "data", "video", "*.mp4")))
-    if not video_files:
-        raise FileNotFoundError("Nessun file .mp4 trovato in data/video")
+    video_files = sorted(
+        [p for p in glob.glob(os.path.join(PROJECT_ROOT, "data", "video", "*")) if p.lower().endswith(".mp4")],
+        key=natural_sort_key,
+    )
+    print("Video ordinati:", [os.path.basename(v) for v in video_files])
 
     cap = cv2.VideoCapture(video_files[0])
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 150)  # frame di prova a ~5 secondi
-    ok, frame = cap.read()
-    cap.release()
-
-    if not ok:
-        raise RuntimeError("Impossibile leggere il frame di test.")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 4800)  # keyframe reale della window_id = 7
 
     extractor = FacialGeometryExtractor()
-    feats = extractor.extract_frame(frame)
-    extractor.close()
+    frame_idx = 0
+    step = 4
 
-    print("Feature geometriche estratte sul frame 150:")
-    for k, v in (feats or {}).items():
-        print(f"  {k}: {v:.4f}")
+    while cap.isOpened():
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        frame_idx += 1
+        if frame_idx % step != 0:
+            continue
+
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        res = extractor.detector.detect(mp_image)
+
+        vis_rgb = extractor.draw_landmarks_on_image(rgb_frame, res)
+        vis_bgr = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
+
+        feats = extractor.extract_frame(frame)
+        if feats is not None:
+            lines = [
+                f"EAR: {feats['ear']:.3f} | MAR: {feats['mar']:.3f} | Brow: {feats['brow_raise']:.3f}",
+                f"Pitch: {feats['pitch']:+.1f} | Yaw: {feats['yaw']:+.1f} | Roll: {feats['roll']:+.1f}",
+                f"Smile: {feats['bs_smile']:.2f} | JawOpen: {feats['bs_jaw_open']:.2f} | Blink: {feats['bs_blink']:.2f}",
+            ]
+            for i, text in enumerate(lines):
+                y_pos = 30 + i * 28
+                cv2.putText(vis_bgr, text, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(vis_bgr, text, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 180), 2, cv2.LINE_AA)
+
+        h, w = vis_bgr.shape[:2]
+        max_h = 850
+        if h > max_h:
+            scale = max_h / h
+            vis_bgr = cv2.resize(vis_bgr, (int(w * scale), int(h * scale)))
+
+        cv2.imshow("MediaPipe FaceLandmarker - Sanity Check", vis_bgr)
+        key = cv2.waitKey(1) & 0xFF
+        if key in (ord("q"), 27):
+            break
+        elif key == ord(" "):
+            cv2.waitKey(0)
+
+    cap.release()
+    extractor.close()
+    cv2.destroyAllWindows()
+    
+    """
+    pass
